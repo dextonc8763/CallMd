@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>召喚麥當當</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.4/mqtt.min.js"></script>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        min-height: 100dvh;
+        background: #0a0a0a;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        font-family: "Courier New", Courier, monospace;
+        color: #e8e2d0;
+        padding: 2rem 1rem;
+      }
+
+      .device {
+        width: 100%;
+        max-width: 340px;
+        background: #111;
+        border: 1px solid #2a2a2a;
+        border-radius: 16px;
+        padding: 2rem 1.5rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+      }
+
+      .screen {
+        background: #0d1a0d;
+        border: 1px solid #1a3a1a;
+        border-radius: 8px;
+        padding: 1rem 1.2rem;
+        min-height: 90px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        gap: 0.5rem;
+      }
+
+      .screen-label {
+        font-size: 10px;
+        letter-spacing: 0.15em;
+        color: #3a5a3a;
+        text-transform: uppercase;
+      }
+
+      .screen-status {
+        font-size: 13px;
+        color: #5aff5a;
+        min-height: 1.4em;
+        line-height: 1.4;
+      }
+
+      .screen-status.error {
+        color: #ff5a5a;
+      }
+      .screen-status.incoming {
+        color: #ffdd5a;
+        animation: blink 0.5s step-end infinite;
+      }
+
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      .screen-time {
+        font-size: 10px;
+        color: #2a4a2a;
+        text-align: right;
+      }
+
+      .header-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .signal-row {
+        display: flex;
+        gap: 3px;
+        align-items: flex-end;
+      }
+
+      .signal-bar {
+        width: 4px;
+        background: #1a3a1a;
+        border-radius: 1px;
+      }
+      .signal-bar.active {
+        background: #5aff5a;
+      }
+      .signal-bar:nth-child(1) {
+        height: 5px;
+      }
+      .signal-bar:nth-child(2) {
+        height: 9px;
+      }
+      .signal-bar:nth-child(3) {
+        height: 13px;
+      }
+      .signal-bar:nth-child(4) {
+        height: 17px;
+      }
+
+      .allow-btn {
+        width: 100%;
+        background: #0a1a0a;
+        border: 1px solid #2a5a2a;
+        border-radius: 8px;
+        color: #5aff5a;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 13px;
+        padding: 0.9rem;
+        cursor: pointer;
+        letter-spacing: 0.05em;
+        transition: background 0.1s;
+      }
+
+      .allow-btn:hover {
+        background: #0f2a0f;
+      }
+      .allow-btn.done {
+        border-color: #1a3a1a;
+        color: #3a5a3a;
+        cursor: default;
+      }
+
+      .footer {
+        font-size: 10px;
+        color: #2a2a2a;
+        text-align: center;
+        letter-spacing: 0.1em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="device">
+      <div class="screen">
+        <div class="header-row">
+          <span class="screen-label">Pager · 監聽中</span>
+          <div class="signal-row" id="signal">
+            <div class="signal-bar"></div>
+            <div class="signal-bar"></div>
+            <div class="signal-bar"></div>
+            <div class="signal-bar"></div>
+          </div>
+        </div>
+        <div class="screen-status error" id="status">連線中...</div>
+        <div class="screen-time" id="clock"></div>
+      </div>
+
+      <button class="allow-btn" id="notif-btn" onclick="requestNotif()">
+        允許通知
+      </button>
+
+      <div class="footer">保持此頁面開啟以接收呼叫</div>
+    </div>
+
+    <audio id="alert-audio" preload="auto">
+      <source src="alert.wav" type="audio/wav" />
+    </audio>
+
+    <script>
+      const BROKER = "wss://test.mosquitto.org:8081/mqtt";
+      const TOPIC = "dexton/ping/sakura2024secret";
+      const COOLDOWN = 10000;
+
+      let lastPing = 0;
+      let notifGranted = false;
+
+      const statusEl = document.getElementById("status");
+      const clockEl = document.getElementById("clock");
+      const signalEl = document.getElementById("signal");
+      const notifBtn = document.getElementById("notif-btn");
+      const audio = document.getElementById("alert-audio");
+
+      function updateClock() {
+        const now = new Date();
+        clockEl.textContent = now.toLocaleTimeString("ja-JP", {
+          hour12: false,
+        });
+      }
+      updateClock();
+      setInterval(updateClock, 1000);
+
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        statusEl.className = "screen-status" + (cls ? " " + cls : "");
+      }
+
+      function setSignal(on) {
+        const bars = signalEl.querySelectorAll(".signal-bar");
+        bars.forEach((b, i) => b.classList.toggle("active", on && i < 3));
+      }
+
+      function requestNotif() {
+        if (Notification.permission === "granted") {
+          notifGranted = true;
+          notifBtn.textContent = "通知已允許";
+          notifBtn.classList.add("done");
+          notifBtn.onclick = null;
+          return;
+        }
+        Notification.requestPermission().then((p) => {
+          if (p === "granted") {
+            notifGranted = true;
+            notifBtn.textContent = "通知已允許";
+            notifBtn.classList.add("done");
+            notifBtn.onclick = null;
+          }
+        });
+      }
+
+      if (Notification.permission === "granted") {
+        notifGranted = true;
+        notifBtn.textContent = "通知已允許";
+        notifBtn.classList.add("done");
+        notifBtn.onclick = null;
+      }
+
+      function triggerAlert() {
+        const now = Date.now();
+        if (now - lastPing < COOLDOWN) return;
+        lastPing = now;
+
+        setStatus("有人在呼叫你！", "incoming");
+        setTimeout(() => setStatus("監聽中", ""), 8000);
+
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+
+        if (notifGranted) {
+          new Notification("狗帶", {
+            body: "狗帶狗帶狗帶狗帶狗帶",
+            requireInteraction: true,
+          });
+        }
+      }
+
+      const client = mqtt.connect(BROKER, { reconnectPeriod: 3000 });
+
+      client.on("connect", () => {
+        client.subscribe(TOPIC);
+        setStatus("監聽中", "");
+        setSignal(true);
+      });
+
+      client.on("message", () => triggerAlert());
+
+      client.on("error", () => {
+        setStatus("連線錯誤", "error");
+        setSignal(false);
+      });
+
+      client.on("offline", () => {
+        setStatus("離線中...", "error");
+        setSignal(false);
+      });
+    </script>
+  </body>
+</html>
